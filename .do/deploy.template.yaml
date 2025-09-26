@@ -1,7 +1,19 @@
 spec:
-  name: sample-flask
+  name: lionrock-backend
   services:
-  - name: web
-    git:
-      branch: main
-      repo_clone_url: https://github.com/digitalocean/sample-flask.git
+    - name: api
+      environment_slug: python
+      git:
+        branch: main
+        repo_clone_url: https://github.com/codedoctor919/Lion-Rock.git
+      build_command: pip install -r fastAPI/requirements.txt
+      run_command: uvicorn fastAPI.app.main:app --host 0.0.0.0 --port 8080
+      http_port: 8080
+      instance_count: 1
+      instance_size_slug: basic-xxs
+      routes:
+        - path: /
+      envs:
+        - key: DEEPSEEK_API_KEY
+          scope: RUN_TIME
+          type: SECRET
