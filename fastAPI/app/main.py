@@ -14,7 +14,7 @@ load_dotenv()
 # FastAPI app
 app = FastAPI(
     title="LionRock Backend API",
-    description="Backend API for LionRock with DigitalOcean, PostgreSQL and Posthog",
+    description="Backend API for LionRock with subscription check",
     version="1.0.0"
 )
 
@@ -35,12 +35,25 @@ if not DEEPSEEK_API_KEY:
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
+# WordPress Membership API
+MEMBERSHIP_API = "https://lionrocklabs.com/wp-json/membership/v1/status"
+
 # Request and response models
 class ChatRequest(BaseModel):
     message: str
+    user_id: str
 
 class ChatResponse(BaseModel):
     reply: str
+
+# Check subscription (testing with user_id=6)
+async def check_subscription(user_id: int = 6):
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{MEMBERSHIP_API}?user_id={user_id}")
+        if res.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to check subscription")
+        data = res.json()
+        return data.get("subscribed", False)
 
 # Streaming generator
 async def event_stream(req_message: str):
@@ -78,7 +91,6 @@ async def event_stream(req_message: str):
                         delta = data["choices"][0]["delta"].get("content")
                         if delta:
                             full_text += delta
-                            # yield the **full text so far**
                             yield f"data: {full_text}\n\n"
                             await asyncio.sleep(0.01)
                     except Exception:
@@ -87,11 +99,24 @@ async def event_stream(req_message: str):
 # Streaming endpoint
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
+    # Check subscription
+    subscribed = await check_subscription(req.user_id)
+    if not subscribed:
+        async def unsubscribed_gen():
+            yield f"data: You are not a subscribed member. Please subscribe to use the chatbot.\n\n"
+        return StreamingResponse(unsubscribed_gen(), media_type="text/event-stream")
+
+    # 2️⃣ Proceed to chatbot streaming
     return StreamingResponse(event_stream(req.message), media_type="text/event-stream")
 
 # Optional: fallback non-streaming endpoint
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
+    # 1️⃣ Check subscription
+    subscribed = await check_subscription(req.user_id)
+    if not subscribed:
+        return ChatResponse(reply="You are not a subscribed member. Please subscribe to use the chatbot.")
+
     payload = {
         "model": "deepseek-chat",
         "messages": [
