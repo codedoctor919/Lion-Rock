@@ -47,7 +47,7 @@ export default function ChatbotWindow() {
       const response = await fetch("http://localhost:8000/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage,user_id: "6" }),
+        body: JSON.stringify({ message: userMessage,user_id: "5" }),
       });
 
       if (!response.body) throw new Error("No response body");
