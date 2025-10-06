@@ -266,7 +266,7 @@ export default function ChatbotWindow() {
     return formattedText;
   };
 
-  const sendMessage = async (customMessage?: string) => {
+  const sendMessage = async (customMessage?: string, templateLabel?: string) => {
     const messageToSend = customMessage || input;
     if (!messageToSend.trim()) return;
     if (!userId.trim()) {
@@ -305,7 +305,8 @@ export default function ChatbotWindow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           message: userMessage, 
-          user_id: userId 
+          user_id: userId,
+          template_label: templateLabel || null  // NEW: Send template label to backend
         }),
       });
 
@@ -535,7 +536,7 @@ export default function ChatbotWindow() {
     }
 
     const formattedMessage = formatTemplate(selectedTemplate, templateInputs);
-    sendMessage(formattedMessage);
+    sendMessage(formattedMessage, selectedTemplate.label);  // NEW: Pass template label
     setSelectedTemplate(null);
     setTemplateInputs({});
   };
