@@ -9,8 +9,7 @@ import json
 import asyncio
 from datetime import datetime, date
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Date
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
 import databases
 
 # Load environment variables
@@ -131,7 +130,7 @@ def check_user_usage(db: Session, user_id: str, plan: str):
         db.refresh(user_usage)
     
     # Get daily limit based on plan
-    daily_limit = DAILY_PROMPT_CAP.get(plan, 5)  # Default to 5 if plan not found
+    daily_limit = DAILY_PROMPT_CAP.get(plan, 0)  # Default to 0 if plan not found
     
     # Check if user has exceeded daily limit
     if user_usage.prompt_count >= daily_limit:
@@ -167,7 +166,7 @@ def save_chat_message(db: Session, user_id: str, message: str, reply: str = None
     
     db.commit()
 
-# Streaming generator
+# Streaming generator - FIXED VERSION
 async def event_stream(req_message: str, user_id: str, db: Session):
     payload = {
         "model": "deepseek-chat",
@@ -203,8 +202,8 @@ async def event_stream(req_message: str, user_id: str, db: Session):
                         delta = data["choices"][0]["delta"].get("content")
                         if delta:
                             full_text += delta
-                            yield f"data: {full_text}\n\n"
-                            await asyncio.sleep(0.01)
+                            # Send only the new delta, not the full accumulated text
+                            yield f"data: {json.dumps({'delta': delta, 'full_text': full_text})}\n\n"
                     except Exception:
                         continue
     
@@ -253,8 +252,10 @@ async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
     try:
         user_usage, daily_limit = check_user_usage(db, req.user_id, plan)
     except HTTPException as e:
+        # Capture the exception detail in a variable that the generator can access
+        error_detail = e.detail
         async def limit_exceeded_gen():
-            yield f"data: {e.detail}\n\n"
+            yield f"data: {error_detail}\n\n"
         return StreamingResponse(limit_exceeded_gen(), media_type="text/event-stream")
     
     # Save user message to database
