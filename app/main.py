@@ -457,7 +457,8 @@ async def admin_login(password: str = Form(...)):
             value=session_token,
             httponly=True,
             max_age=3600,
-            samesite="lax"
+            samesite="none",
+            secure=True
         )
         track_event("admin", "admin_logged_in")
         return response
