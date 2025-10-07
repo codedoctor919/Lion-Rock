@@ -7,8 +7,8 @@ spec:
         branch: main
         repo_clone_url: https://github.com/codedoctor919/Lion-Rock.git
       build_command: pip install -r requirements.txt
-      run_command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-      http_port: 8000
+      run_command: uvicorn app.main:app --host 0.0.0.0 --port 8080
+      http_port: 8080
       instance_count: 1
       instance_size_slug: basic-xxs
       routes:
