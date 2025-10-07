@@ -32,11 +32,11 @@ origins = [
     "http://localhost:3000",  # Next.js development server
     "http://localhost:8000",  # FastAPI development server
     "https://lionrock-6p8fy.ondigitalocean.app", #FastAPI production server
-    "https://lionrock-frontend.vercel.app/" #Frontend Production Server
+    "https://lionrock-frontend.vercel.app" #Frontend Production Server
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins={"*"},
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
