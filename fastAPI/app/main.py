@@ -29,8 +29,10 @@ app = FastAPI(
 
 # CORS configuration
 origins = [
-    "http://localhost:3000",  # Next.js frontend
-    "http://localhost:8000",  # FastAPI itself
+    "http://localhost:3000",  # Next.js development server
+    "http://localhost:8000",  # FastAPI development server
+    "https://lionrock-6p8fy.ondigitalocean.app", #FastAPI production server
+    "https://lionrock-chatbot.vercel.app/" #Frontend Production Server
 ]
 app.add_middleware(
     CORSMiddleware,

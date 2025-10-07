@@ -14,7 +14,7 @@ export default function AdminLogin() {
     setError('');
 
     try {
-      const response = await fetch('http://localhost:8000/admin/login', {
+      const response = await fetch('https://lionrock-6p8fy.ondigitalocean.app/admin/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
