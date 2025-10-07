@@ -539,4 +539,4 @@ if __name__ == "__main__":
         raise ValueError("DATABASE_URL is not set. Please check your .env file.")
     
     print("Starting LionRock Backend API...")
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=True)
