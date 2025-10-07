@@ -291,7 +291,7 @@ async def event_stream(req_message: str, user_id: str, db: Session, template_lab
         "template_label": template_label
     })
 
-@app.post("/chat/stream")
+@app.post("/chats/stream")
 async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
     track_event(req.user_id, "chat_started", {
         "message_length": len(req.message),
