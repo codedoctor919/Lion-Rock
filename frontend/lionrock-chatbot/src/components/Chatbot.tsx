@@ -247,7 +247,7 @@ export default function ChatbotWindow() {
   // Fetch usage information
   const fetchUsageInfo = async (userId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/usage/${userId}`);
+      const response = await fetch(`https://lionrock-6p8fy.ondigitalocean.app/usage/${userId}`);
       if (response.ok) {
         const data = await response.json();
         setUsageInfo(data);
@@ -300,7 +300,7 @@ export default function ChatbotWindow() {
     });
 
     try {
-      const response = await fetch("http://localhost:8000/chat/stream", {
+      const response = await fetch("https://lionrock-6p8fy.ondigitalocean.app/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 

@@ -21,7 +21,7 @@ export default function AdminDashboard() {
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch('http://localhost:8000/admin/api/metrics', {
+      const response = await fetch('https://lionrock-6p8fy.ondigitalocean.app/admin/api/metrics', {
         credentials: 'include', // Important for cookies
       });
 
