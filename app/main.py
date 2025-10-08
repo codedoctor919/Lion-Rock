@@ -54,7 +54,7 @@ MEMBERSHIP_API = "https://lionrocklabs.com/wp-json/membership/v1/status"
 POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY")
 if POSTHOG_API_KEY:
     posthog.api_key = POSTHOG_API_KEY
-    posthog.host = 'https://app.posthog.com'
+    posthog.host = 'https://eu.posthog.com'
 
 # Admin Configuration
 ADMIN_PASSWORD_HASH = hashlib.sha256(os.getenv("ADMIN_PASSWORD", "admin123").encode()).hexdigest()
@@ -608,6 +608,31 @@ async def admin_logout(request: Request, authenticated: bool = Depends(verify_ad
     response = RedirectResponse(url="/admin/login", status_code=303)
     response.delete_cookie("admin_session")
     return response
+
+
+
+@app.get("/debug/posthog")
+async def debug_posthog():
+    """Debug PostHog configuration"""
+    debug_info = {
+        "posthog_api_key_set": bool(POSTHOG_API_KEY),
+        "posthog_api_key_length": len(POSTHOG_API_KEY) if POSTHOG_API_KEY else 0,
+        "posthog_host": posthog.host if POSTHOG_API_KEY else "Not set"
+    }
+    
+    # Test event
+    if POSTHOG_API_KEY:
+        try:
+            posthog.capture(
+                distinct_id="debug_user",
+                event="debug_test_event",
+                properties={"debug": True, "timestamp": datetime.utcnow().isoformat()}
+            )
+            debug_info["test_event_sent"] = True
+        except Exception as e:
+            debug_info["test_event_error"] = str(e)
+    
+    return debug_info
 
 # =============================================================================
 # APPLICATION STARTUP
