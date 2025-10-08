@@ -30,9 +30,9 @@ app = FastAPI(
 # CORS configuration
 origins = [
     "http://localhost:3000",  # Next.js development server
-    "http://localhost:8000",  # FastAPI development server
-    "https://lionrock-6p8fy.ondigitalocean.app", #FastAPI production server
-    "https://lionrock-frontend.vercel.app" #Frontend Production Server
+    "http://localhost:8080",  # FastAPI development server
+    "https://lionrock-6p8fy.ondigitalocean.app",  # FastAPI production server
+    "https://lionrock-frontend.vercel.app"  # Frontend Production Server
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -54,16 +54,17 @@ MEMBERSHIP_API = "https://lionrocklabs.com/wp-json/membership/v1/status"
 POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY")
 if POSTHOG_API_KEY:
     posthog.api_key = POSTHOG_API_KEY
-    posthog.host = 'https://app.posthog.com'
+    posthog.host = 'https://eu.posthog.com'
 
 # Admin Configuration
 ADMIN_PASSWORD_HASH = hashlib.sha256(os.getenv("ADMIN_PASSWORD", "admin123").encode()).hexdigest()
 active_sessions = {}
 
-# Usage limits
-DAILY_PROMPT_CAP = {
-    "Standard": 5,
-    "Pro": 50
+# Usage limits - CORRECTED CONFIGURATION
+USAGE_LIMITS = {
+    "Standard": {"limit": 5, "period": "monthly"},   # 5 prompts per month
+    "Pro": {"limit": 50, "period": "daily"},         # 50 prompts per day
+    "Premium": {"limit": 50, "period": "daily"}      # 50 prompts per day
 }
 
 # =============================================================================
@@ -92,7 +93,7 @@ class ChatHistory(Base):
     message = Column(Text)
     reply = Column(Text)
     message_type = Column(String)
-    template_label = Column(String, nullable=True)  # NEW: Store template label
+    template_label = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
@@ -115,6 +116,7 @@ def verify_admin_session(request: Request):
     return True
 
 def track_event(user_id: str, event_name: str, properties: dict = None):
+    """Track analytics events with PostHog"""
     if not POSTHOG_API_KEY:
         return
     
@@ -132,6 +134,7 @@ def track_event(user_id: str, event_name: str, properties: dict = None):
 # =============================================================================
 
 async def check_subscription(user_id: str):
+    """Check user subscription status with WordPress membership API"""
     async with httpx.AsyncClient() as client:
         try:
             res = await client.get(f"{MEMBERSHIP_API}?user_id={user_id}", timeout=10.0)
@@ -151,46 +154,103 @@ async def check_subscription(user_id: str):
             return {"subscribed": False, "plan": "Free"}
 
 def check_user_usage(db: Session, user_id: str, plan: str):
+    """
+    Check and update user usage based on their subscription plan
+    Returns: (user_usage_record, limit)
+    """
     today = date.today()
+    first_day_of_month = today.replace(day=1)
     
-    user_usage = db.query(UserUsage).filter(
-        UserUsage.user_id == user_id,
-        UserUsage.date == today
-    ).first()
+    # Get usage limits for the plan
+    plan_config = USAGE_LIMITS.get(plan, {"limit": 0, "period": "daily"})
+    limit = plan_config["limit"]
+    period = plan_config["period"]
     
-    if not user_usage:
-        user_usage = UserUsage(user_id=user_id, date=today, prompt_count=0)
-        db.add(user_usage)
+    if period == "monthly":
+        # STANDARD PLAN: Monthly usage check (5 per month)
+        monthly_usage = db.query(func.sum(UserUsage.prompt_count)).filter(
+            UserUsage.user_id == user_id,
+            UserUsage.date >= first_day_of_month
+        ).scalar() or 0
+        
+        if monthly_usage >= limit:
+            track_event(user_id, "quota_exceeded", {
+                "plan": plan,
+                "monthly_usage": monthly_usage,
+                "monthly_limit": limit
+            })
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Monthly limit reached. You have used {monthly_usage}/{limit} messages this month."
+            )
+        
+        # Get or create today's usage record for tracking
+        user_usage = db.query(UserUsage).filter(
+            UserUsage.user_id == user_id,
+            UserUsage.date == today
+        ).first()
+        
+        if not user_usage:
+            user_usage = UserUsage(user_id=user_id, date=today, prompt_count=0)
+            db.add(user_usage)
+            db.commit()
+            db.refresh(user_usage)
+            track_event(user_id, "usage_record_created", {"plan": plan})
+        
+        # Increment usage count
+        user_usage.prompt_count += 1
         db.commit()
-        db.refresh(user_usage)
-        track_event(user_id, "usage_record_created", {"plan": plan})
-    
-    daily_limit = DAILY_PROMPT_CAP.get(plan, 0)
-    
-    if user_usage.prompt_count >= daily_limit:
-        track_event(user_id, "quota_exceeded", {
+        
+        track_event(user_id, "message_sent", {
             "plan": plan,
-            "prompt_count": user_usage.prompt_count,
-            "daily_limit": daily_limit
+            "new_prompt_count": user_usage.prompt_count,
+            "monthly_usage": monthly_usage + 1,
+            "monthly_limit": limit,
+            "remaining_quota": max(0, limit - (monthly_usage + 1))
         })
-        raise HTTPException(
-            status_code=429, 
-            detail=f"Daily limit reached. You have used {user_usage.prompt_count}/{daily_limit} messages today."
-        )
-    
-    user_usage.prompt_count += 1
-    db.commit()
-    
-    track_event(user_id, "message_sent", {
-        "plan": plan,
-        "new_prompt_count": user_usage.prompt_count,
-        "daily_limit": daily_limit,
-        "remaining_quota": daily_limit - user_usage.prompt_count
-    })
-    
-    return user_usage, daily_limit
+        
+        return user_usage, limit
+        
+    else:
+        # PRO & PREMIUM PLANS: Daily usage check (50 per day)
+        user_usage = db.query(UserUsage).filter(
+            UserUsage.user_id == user_id,
+            UserUsage.date == today
+        ).first()
+        
+        if not user_usage:
+            user_usage = UserUsage(user_id=user_id, date=today, prompt_count=0)
+            db.add(user_usage)
+            db.commit()
+            db.refresh(user_usage)
+            track_event(user_id, "usage_record_created", {"plan": plan})
+        
+        if user_usage.prompt_count >= limit:
+            track_event(user_id, "quota_exceeded", {
+                "plan": plan,
+                "prompt_count": user_usage.prompt_count,
+                "daily_limit": limit
+            })
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Daily limit reached. You have used {user_usage.prompt_count}/{limit} messages today."
+            )
+        
+        # Increment usage count
+        user_usage.prompt_count += 1
+        db.commit()
+        
+        track_event(user_id, "message_sent", {
+            "plan": plan,
+            "new_prompt_count": user_usage.prompt_count,
+            "daily_limit": limit,
+            "remaining_quota": limit - user_usage.prompt_count
+        })
+        
+        return user_usage, limit
 
 def save_chat_message(db: Session, user_id: str, message: str, reply: str = None, template_label: str = None):
+    """Save chat message and bot reply to database"""
     # Save user message
     user_message = ChatHistory(
         user_id=user_id,
@@ -204,8 +264,8 @@ def save_chat_message(db: Session, user_id: str, message: str, reply: str = None
     if reply:
         bot_reply = ChatHistory(
             user_id=user_id,
-            message=None,  # Bot messages don't have a "message" field
-            reply=reply,   # Bot replies go in the "reply" field
+            message=None,
+            reply=reply,
             message_type="bot",
             template_label=template_label
         )
@@ -226,7 +286,7 @@ def save_chat_message(db: Session, user_id: str, message: str, reply: str = None
 class ChatRequest(BaseModel):
     message: str
     user_id: str
-    template_label: Optional[str] = None  # NEW: Template label field
+    template_label: Optional[str] = None
 
 class ChatResponse(BaseModel):
     reply: str
@@ -240,6 +300,7 @@ class UsageResponse(BaseModel):
     plan: str
 
 async def event_stream(req_message: str, user_id: str, db: Session, template_label: str = None):
+    """Stream chat response from DeepSeek API"""
     payload = {
         "model": "deepseek-chat",
         "messages": [
@@ -293,11 +354,13 @@ async def event_stream(req_message: str, user_id: str, db: Session, template_lab
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
+    """Streaming chat endpoint"""
     track_event(req.user_id, "chat_started", {
         "message_length": len(req.message),
         "template_label": req.template_label
     })
     
+    # Check subscription status
     subscription_data = await check_subscription(req.user_id)
     
     if not subscription_data.get("subscribed"):
@@ -308,16 +371,14 @@ async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
     
     plan = subscription_data.get("plan", "Standard")
     
+    # Check usage limits
     try:
-        user_usage, daily_limit = check_user_usage(db, req.user_id, plan)
+        user_usage, limit = check_user_usage(db, req.user_id, plan)
     except HTTPException as e:
         error_detail = e.detail
         async def limit_exceeded_gen():
             yield f"data: {error_detail}\n\n"
         return StreamingResponse(limit_exceeded_gen(), media_type="text/event-stream")
-    
-    # DON'T save user message here - wait until we have the bot reply
-    # save_chat_message(db, req.user_id, req.message, template_label=req.template_label)
     
     return StreamingResponse(
         event_stream(req.message, req.user_id, db, req.template_label), 
@@ -326,10 +387,12 @@ async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
+    """Non-streaming chat endpoint"""
     track_event(req.user_id, "non_streaming_chat_started", {
         "template_label": req.template_label
     })
     
+    # Check subscription status
     subscription_data = await check_subscription(req.user_id)
     
     if not subscription_data.get("subscribed"):
@@ -337,10 +400,11 @@ async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
         return ChatResponse(reply="You are not a subscribed member. Please subscribe to use the chatbot.")
     
     plan = subscription_data.get("plan", "Standard")
-    user_usage, daily_limit = check_user_usage(db, req.user_id, plan)
-    # DON'T save user message here - wait until we have the bot reply
-    # save_chat_message(db, req.user_id, req.message, template_label=req.template_label)
+    
+    # Check usage limits
+    user_usage, limit = check_user_usage(db, req.user_id, plan)
 
+    # Call DeepSeek API
     payload = {
         "model": "deepseek-chat",
         "messages": [
@@ -388,31 +452,46 @@ async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
 
 @app.get("/usage/{user_id}", response_model=UsageResponse)
 async def get_user_usage(user_id: str, db: Session = Depends(get_db)):
+    """Get current usage information for a user"""
     track_event(user_id, "usage_checked")
     
     subscription_data = await check_subscription(user_id)
     plan = subscription_data.get("plan", "Standard") if subscription_data.get("subscribed") else "Free"
     
     today = date.today()
-    user_usage = db.query(UserUsage).filter(
-        UserUsage.user_id == user_id,
-        UserUsage.date == today
-    ).first()
+    first_day_of_month = today.replace(day=1)
     
-    current_count = user_usage.prompt_count if user_usage else 0
-    daily_limit = DAILY_PROMPT_CAP.get(plan, 5)
+    # Get usage limits for the plan
+    plan_config = USAGE_LIMITS.get(plan, {"limit": 0, "period": "daily"})
+    limit = plan_config["limit"]
+    period = plan_config["period"]
+    
+    if period == "monthly":
+        # STANDARD PLAN: Show monthly usage
+        current_count = db.query(func.sum(UserUsage.prompt_count)).filter(
+            UserUsage.user_id == user_id,
+            UserUsage.date >= first_day_of_month
+        ).scalar() or 0
+    else:
+        # PRO & PREMIUM PLANS: Show daily usage
+        user_usage = db.query(UserUsage).filter(
+            UserUsage.user_id == user_id,
+            UserUsage.date == today
+        ).first()
+        current_count = user_usage.prompt_count if user_usage else 0
     
     return UsageResponse(
         user_id=user_id,
         date=today,
         prompt_count=current_count,
-        daily_limit=daily_limit,
-        remaining_quota=max(0, daily_limit - current_count),
+        daily_limit=limit,
+        remaining_quota=max(0, limit - current_count),
         plan=plan
     )
 
 @app.get("/chat/history/{user_id}")
 async def get_chat_history(user_id: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Get chat history for a user"""
     track_event(user_id, "chat_history_accessed")
     
     chat_history = db.query(ChatHistory).filter(
@@ -427,7 +506,7 @@ async def get_chat_history(user_id: str, limit: int = 50, db: Session = Depends(
                 "message": chat.message,
                 "reply": chat.reply,
                 "message_type": chat.message_type,
-                "template_label": chat.template_label,  # NEW: Include template label
+                "template_label": chat.template_label,
                 "created_at": chat.created_at
             }
             for chat in reversed(chat_history)
@@ -437,8 +516,10 @@ async def get_chat_history(user_id: str, limit: int = 50, db: Session = Depends(
 # =============================================================================
 # ADMIN API ENDPOINTS
 # =============================================================================
+
 @app.post("/admin/login")
 async def admin_login(password: str = Form(...)):
+    """Admin login endpoint"""
     password_hash = hashlib.sha256(password.encode()).hexdigest()
     if password_hash == ADMIN_PASSWORD_HASH:
         session_token = secrets.token_hex(32)
@@ -468,6 +549,7 @@ async def admin_login(password: str = Form(...)):
 
 @app.get("/admin/api/metrics")
 async def get_admin_metrics(authenticated: bool = Depends(verify_admin_session)):
+    """Get admin dashboard metrics"""
     today = date.today()
     first_day_of_month = today.replace(day=1)
     
@@ -487,7 +569,7 @@ async def get_admin_metrics(authenticated: bool = Depends(verify_admin_session))
         # API Cost
         approximate_cost = total_monthly_messages * 0.07
         
-        # Top Prompts - NEW: Count by template_label
+        # Top Prompts
         top_prompts_query = db.query(
             ChatHistory.template_label,
             func.count(ChatHistory.id)
@@ -516,6 +598,7 @@ async def get_admin_metrics(authenticated: bool = Depends(verify_admin_session))
 
 @app.post("/admin/logout")
 async def admin_logout(request: Request, authenticated: bool = Depends(verify_admin_session)):
+    """Admin logout endpoint"""
     session_token = request.cookies.get("admin_session")
     if session_token in active_sessions:
         del active_sessions[session_token]
@@ -525,6 +608,7 @@ async def admin_logout(request: Request, authenticated: bool = Depends(verify_ad
     response = RedirectResponse(url="/admin/login", status_code=303)
     response.delete_cookie("admin_session")
     return response
+
 
 # =============================================================================
 # APPLICATION STARTUP
