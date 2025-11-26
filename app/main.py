@@ -62,10 +62,9 @@ active_sessions = {}
 
 # Usage limits - CORRECTED CONFIGURATION
 USAGE_LIMITS = {
-    "Standard": {"limit": 5, "period": "monthly"},   # 5 prompts per month
+    "Starter": {"limit": 5, "period": "monthly"},   # 5 prompts per month
     "Pro": {"limit": 50, "period": "daily"},         # 50 prompts per day
-    "Premium": {"limit": 50, "period": "daily"}      # 50 prompts per day
-}
+    }
 
 # =============================================================================
 # DATABASE MODELS
@@ -167,7 +166,7 @@ def check_user_usage(db: Session, user_id: str, plan: str):
     period = plan_config["period"]
     
     if period == "monthly":
-        # STANDARD PLAN: Monthly usage check (5 per month)
+        # Starter Plan: Monthly usage check (5 per month)
         monthly_usage = db.query(func.sum(UserUsage.prompt_count)).filter(
             UserUsage.user_id == user_id,
             UserUsage.date >= first_day_of_month
@@ -212,7 +211,7 @@ def check_user_usage(db: Session, user_id: str, plan: str):
         return user_usage, limit
         
     else:
-        # PRO & PREMIUM PLANS: Daily usage check (50 per day)
+        # PRO PLAN: Daily usage check (50 per day)
         user_usage = db.query(UserUsage).filter(
             UserUsage.user_id == user_id,
             UserUsage.date == today
@@ -369,7 +368,7 @@ async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
             yield f"data: You are not a subscribed member. Please subscribe to use the chatbot.\n\n"
         return StreamingResponse(unsubscribed_gen(), media_type="text/event-stream")
     
-    plan = subscription_data.get("plan", "Standard")
+    plan = subscription_data.get("plan", "Starter")
     
     # Check usage limits
     try:
@@ -399,7 +398,7 @@ async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
         track_event(req.user_id, "unsubscribed_non_streaming_attempt")
         return ChatResponse(reply="You are not a subscribed member. Please subscribe to use the chatbot.")
     
-    plan = subscription_data.get("plan", "Standard")
+    plan = subscription_data.get("plan", "Starter")
     
     # Check usage limits
     user_usage, limit = check_user_usage(db, req.user_id, plan)
@@ -456,7 +455,7 @@ async def get_user_usage(user_id: str, db: Session = Depends(get_db)):
     track_event(user_id, "usage_checked")
     
     subscription_data = await check_subscription(user_id)
-    plan = subscription_data.get("plan", "Standard") if subscription_data.get("subscribed") else "Free"
+    plan = subscription_data.get("plan", "Starter") if subscription_data.get("subscribed") else "Free"
     
     today = date.today()
     first_day_of_month = today.replace(day=1)
@@ -467,13 +466,13 @@ async def get_user_usage(user_id: str, db: Session = Depends(get_db)):
     period = plan_config["period"]
     
     if period == "monthly":
-        # STANDARD PLAN: Show monthly usage
+        # Starter Plan: Show monthly usage
         current_count = db.query(func.sum(UserUsage.prompt_count)).filter(
             UserUsage.user_id == user_id,
             UserUsage.date >= first_day_of_month
         ).scalar() or 0
     else:
-        # PRO & PREMIUM PLANS: Show daily usage
+        # PRO PLAN: Show daily usage
         user_usage = db.query(UserUsage).filter(
             UserUsage.user_id == user_id,
             UserUsage.date == today
