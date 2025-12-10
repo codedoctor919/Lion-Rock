@@ -48,7 +48,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # API Keys and External Services
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-MEMBERSHIP_API = "https://lionrocklabs.com/wp-json/membership/v1/status"
+WORDPRESS_MEMBERSHIP_API = "https://lionrocklabs.com/wp-json/membership/v1/me"
 
 # PostHog Analytics Configuration
 POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY")
@@ -62,6 +62,7 @@ active_sessions = {}
 
 # Usage limits - CORRECTED CONFIGURATION
 USAGE_LIMITS = {
+    "Free": {"limit": 0, "period": "daily"},         # 0 prompts for free users
     "Starter": {"limit": 5, "period": "monthly"},   # 5 prompts per month
     "Pro": {"limit": 50, "period": "daily"},         # 50 prompts per day
     }
@@ -132,25 +133,102 @@ def track_event(user_id: str, event_name: str, properties: dict = None):
 # BUSINESS LOGIC
 # =============================================================================
 
-async def check_subscription(user_id: str):
-    """Check user subscription status with WordPress membership API"""
-    async with httpx.AsyncClient() as client:
-        try:
-            res = await client.get(f"{MEMBERSHIP_API}?user_id={user_id}", timeout=10.0)
-            if res.status_code != 200:
-                track_event(user_id, "subscription_check_failed", {"status_code": res.status_code})
-                return {"subscribed": False, "plan": "Free"}
-            
-            data = res.json()
-            track_event(user_id, "subscription_checked", {
-                "subscribed": data.get("subscribed", False),
-                "plan": data.get("plan", "Free")
+async def verify_user_with_wordpress(wp_nonce: str = None):
+    """Verify user with WordPress API using provided authentication data"""
+    if not wp_nonce:
+        return {"verified": False, "error": "No WordPress nonce provided"}
+
+    try:
+        headers = {"X-WP-Nonce": wp_nonce}
+
+        # Note: We don't use cookies for privacy and security reasons.
+        # The nonce should be sufficient for WordPress session validation.
+        # If cookies are required, the frontend has already validated the session.
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                WORDPRESS_MEMBERSHIP_API,
+                headers=headers
+            )
+
+            if response.status_code == 200:
+                wp_data = response.json()
+                return {
+                    "verified": True,
+                    "user_id": str(wp_data.get("user_id")),
+                    "logged_in": wp_data.get("logged_in", False),
+                    "email": wp_data.get("email"),
+                    "plan": wp_data.get("plan", "None")
+                }
+            else:
+                return {
+                    "verified": False,
+                    "error": f"WordPress API returned {response.status_code}",
+                    "details": response.text
+                }
+
+    except httpx.TimeoutException:
+        return {
+            "verified": False,
+            "error": "WordPress API timeout - please try again"
+        }
+    except httpx.HTTPStatusError as e:
+        return {
+            "verified": False,
+            "error": f"WordPress API error: HTTP {e.response.status_code}",
+            "details": e.response.text[:200]  # Limit error details
+        }
+    except httpx.RequestError as e:
+        return {
+            "verified": False,
+            "error": f"Network error connecting to WordPress: {str(e)}"
+        }
+    except Exception as e:
+        # Log unexpected errors for debugging
+        print(f"Unexpected error in WordPress verification: {e}")
+        return {
+            "verified": False,
+            "error": "Verification service temporarily unavailable"
+        }
+
+def check_subscription(user_id: str, logged_in: bool, plan: str, verified_data: dict = None):
+    """Check user subscription status from WordPress membership data"""
+    # If we have verified data from WordPress, use it; otherwise use provided data
+    if verified_data and verified_data.get("verified"):
+        actual_logged_in = verified_data.get("logged_in", False)
+        actual_plan = verified_data.get("plan", "None")
+        actual_user_id = verified_data.get("user_id")
+
+        # Check if provided data matches verified data
+        if str(user_id) != str(actual_user_id):
+            track_event(user_id, "user_mismatch", {
+                "provided_user_id": user_id,
+                "verified_user_id": actual_user_id
             })
-            return data
-        except Exception as e:
-            print(f"Subscription check error: {e}")
-            track_event(user_id, "subscription_check_error", {"error": str(e)})
-            return {"subscribed": False, "plan": "Free"}
+            return {"logged_in": False, "subscribed": False, "plan": "Free", "user_id": user_id}
+
+        logged_in = actual_logged_in
+        plan = actual_plan
+        user_id = actual_user_id
+
+    # Convert "None" plan to "Free" for backward compatibility
+    normalized_plan = "Free" if plan == "None" else plan
+
+    subscription_data = {
+        "logged_in": logged_in,
+        "subscribed": logged_in and plan != "None",
+        "plan": normalized_plan,
+        "user_id": user_id
+    }
+
+    track_event(user_id, "subscription_checked", {
+        "logged_in": logged_in,
+        "subscribed": subscription_data["subscribed"],
+        "plan": normalized_plan,
+        "verified": verified_data.get("verified") if verified_data else False
+    })
+
+    return subscription_data
 
 def check_user_usage(db: Session, user_id: str, plan: str):
     """
@@ -285,7 +363,11 @@ def save_chat_message(db: Session, user_id: str, message: str, reply: str = None
 class ChatRequest(BaseModel):
     message: str
     user_id: str
+    logged_in: bool = False
+    email: Optional[str] = None
+    plan: str = "None"
     template_label: Optional[str] = None
+    wp_nonce: Optional[str] = None  # WordPress nonce for verification
 
 class ChatResponse(BaseModel):
     reply: str
@@ -358,9 +440,23 @@ async def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
         "message_length": len(req.message),
         "template_label": req.template_label
     })
-    
+
+    # Verify user with WordPress if authentication data is provided
+    verified_data = None
+    if req.wp_nonce:
+        verified_data = await verify_user_with_wordpress(req.wp_nonce)
+
+        if not verified_data.get("verified"):
+            track_event(req.user_id, "verification_failed", {
+                "error": verified_data.get("error"),
+                "endpoint": "chat_stream"
+            })
+            async def verification_failed_gen():
+                yield f"data: Authentication verification failed. Please refresh and try again.\n\n"
+            return StreamingResponse(verification_failed_gen(), media_type="text/event-stream")
+
     # Check subscription status
-    subscription_data = await check_subscription(req.user_id)
+    subscription_data = check_subscription(req.user_id, req.logged_in, req.plan, verified_data)
     
     if not subscription_data.get("subscribed"):
         track_event(req.user_id, "unsubscribed_access_attempt")
@@ -390,9 +486,24 @@ async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
     track_event(req.user_id, "non_streaming_chat_started", {
         "template_label": req.template_label
     })
-    
+
+    # Verify user with WordPress if authentication data is provided
+    verified_data = None
+    if req.wp_nonce:
+        verified_data = await verify_user_with_wordpress(req.wp_nonce)
+
+        if not verified_data.get("verified"):
+            track_event(req.user_id, "verification_failed", {
+                "error": verified_data.get("error"),
+                "endpoint": "chat"
+            })
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication verification failed. Please refresh and try again."
+            )
+
     # Check subscription status
-    subscription_data = await check_subscription(req.user_id)
+    subscription_data = check_subscription(req.user_id, req.logged_in, req.plan, verified_data)
     
     if not subscription_data.get("subscribed"):
         track_event(req.user_id, "unsubscribed_non_streaming_attempt")
@@ -450,12 +561,20 @@ async def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
     return ChatResponse(reply=reply)
 
 @app.get("/usage/{user_id}", response_model=UsageResponse)
-async def get_user_usage(user_id: str, db: Session = Depends(get_db)):
+async def get_user_usage(user_id: str, plan: str = "None", wp_nonce: str = None, db: Session = Depends(get_db)):
     """Get current usage information for a user"""
     track_event(user_id, "usage_checked")
-    
-    subscription_data = await check_subscription(user_id)
-    plan = subscription_data.get("plan", "Starter") if subscription_data.get("subscribed") else "Free"
+
+    # Verify user with WordPress if authentication data is provided
+    verified_data = None
+    if wp_nonce:
+        verified_data = await verify_user_with_wordpress(wp_nonce)
+
+        if verified_data.get("verified"):
+            plan = verified_data.get("plan", "None")
+
+    # Normalize plan (convert "None" to "Free" for backward compatibility)
+    normalized_plan = "Free" if plan == "None" else plan
     
     today = date.today()
     first_day_of_month = today.replace(day=1)
@@ -485,7 +604,7 @@ async def get_user_usage(user_id: str, db: Session = Depends(get_db)):
         prompt_count=current_count,
         daily_limit=limit,
         remaining_quota=max(0, limit - current_count),
-        plan=plan
+        plan=normalized_plan
     )
 
 @app.get("/chat/history/{user_id}")
